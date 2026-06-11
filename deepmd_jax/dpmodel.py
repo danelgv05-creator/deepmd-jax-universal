@@ -167,12 +167,21 @@ class DPModel(nn.Module):
             G2_axis_Nsel6A = tensor_3to6(T_Nsel3W[:,:,A:2*A], axis=1) + T_Nsel6W[:,:,A:2*A]
             G_NselAW += (G2_axis_Nsel6A[...,None] * T_Nsel6W[:,:,None]).sum(1)
         if not self.params['atomic']: # Energy prediction
-            fit_n1 = [fitting_net(self.params['fit_widths'])(G) for G in split(G_NselAW.reshape(G_NselAW.shape[0],-1),type_count,0,K=K)]
+            # MODIFICACIÓN: use a sungle shared fitting net for all types
+            shared_fitting = fitting_net(self.params['fit_widths'])
+            
+            # Call the shared fitting net for each type block
+            fit_n1 = [shared_fitting(G) for G in split(G_NselAW.reshape(G_NselAW.shape[0],-1),type_count,0,K=K)]
             pred = (mask * concat([f[:,0]+Eb for f,Eb in zip(fit_n1,self.params['Ebias'])], K=K)).sum()
+            
         else: # Atomic tensor prediction
-            #MODIFICATION: Handle mixed types by computing counts for each selected type
+            # MODIFICACIÓN: use a single shared fitting net
             sel_count = [type_count[i] for i in nsel]
-            fit_nselW = [fitting_net(self.params['fit_widths'], use_final=False)(G) for G in split(G_NselAW.reshape(G_NselAW.shape[0],-1),sel_count,0,K=K)]
+            shared_fitting = fitting_net(self.params['fit_widths'], use_final=False)
+            
+            # Call the shared net for each type block
+            fit_nselW = [shared_fitting(G) for G in split(G_NselAW.reshape(G_NselAW.shape[0],-1),sel_count,0,K=K)]
+            #END OF MODIFICATION
             if self.params['type'] == 'atomic_t2':
                 T_NselYW = (T_Nsel6W + tensor_3to6(T_Nsel3W, axis=1) + T_NselW[:,None] * jnp.array([1,1,1,0,0,0])[:,None])
             elif self.params['type'] == 'atomic':
