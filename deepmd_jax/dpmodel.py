@@ -168,17 +168,17 @@ class DPModel(nn.Module):
             G_NselAW += (G2_axis_Nsel6A[...,None] * T_Nsel6W[:,:,None]).sum(1)
         if not self.params['atomic']: # Energy prediction
             # MODIFICACIÓN: use a sungle shared fitting net for all types
-            shared_fitting = fitting_net(self.params['fit_widths'])# Initialize a single general net
+            shared_fitting = fitting_net(self.params['fit_widths'])                    # Initialize a single general net
             first_pred = shared_fitting(G_NselAW.reshape(G_NselAW.shape[0], -1))[:, 0] # Pass every atom through the shared fitting net
-            ebias_por_atomo = jnp.repeat(jnp.array(self.params['Ebias']), type_count)  # Create an array of Ebias values for each atom based on its type
+            ebias_por_atomo = jnp.repeat(jnp.array(self.params['Ebias']), type_count)  # Create an array of Ebias values for each atom based on its type. Atoms are arranged in types, only has to repeat different Ebias for number of types
             pred = (mask * (first_pred + ebias_por_atomo)).sum()                       #Sum the energies  and appy the mask
             
         else: # Atomic tensor prediction
             # MODIFICACIÓN: use a single shared fitting net
             sel_count = [type_count[i] for i in nsel] #Count each atom type number
-            shared_fitting = fitting_net(self.params['fit_widths'], use_final=False)# Initialize a single general net            
-            fit_all = shared_fitting(G_NselAW.reshape(G_NselAW.shape[0], -1))       # Pass G through the fitting net
-            fit_nselW = split(fit_all, sel_count, 0, K=K)                           #Divide the result into atomic types, to mantain type_pred compatibility
+            shared_fitting = fitting_net(self.params['fit_widths'], use_final=False) # Initialize a single general net            
+            fit_all = shared_fitting(G_NselAW.reshape(G_NselAW.shape[0], -1))        # Pass G through the fitting net
+            fit_nselW = split(fit_all, sel_count, 0, K=K)                            #Divide the result into atomic types, to mantain type_pred compatibility
             if self.params['type'] == 'atomic_t2':
                 T_NselYW = (T_Nsel6W + tensor_3to6(T_Nsel3W, axis=1) + T_NselW[:,None] * jnp.array([1,1,1,0,0,0])[:,None])
             elif self.params['type'] == 'atomic':
