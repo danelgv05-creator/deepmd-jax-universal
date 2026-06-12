@@ -137,14 +137,29 @@ class DPModel(nn.Module):
             if nbrs_nm is not None:
                 T_2_nD, T_2_n3C = lax.with_sharding_constraint([T_2_nD, T_2_n3C], PSpec())
             #Compute the message F for each pair of types, using the shared embedding's output.
-            F_nselmE = [[(linear_norm(E)(T_2_nD[0][i])[:,None]
-                      + (linear_norm(E)(T_2_nD[1][j])[nbrs_nm[i][j]] if nbrs_nm is not None else
-                         jnp.repeat(linear_norm(E)(T_2_nD[1][j]),L,axis=0))
-                      + (R_n3m[i][j][...,None] * (linear_norm(E)(T_2_n3C[0][i])[:,:,None]
-                          + (linear_norm(E)(T_2_n3C[1][j])[nbrs_nm[i][j]].transpose(0,2,1,3) if nbrs_nm is not None else
-                            jnp.repeat(linear_norm(E)(T_2_n3C[1][j]),L,axis=0).transpose(1,0,2)))).sum(1)
-                      + emb) * (self.param('layer_norm_%d_%d'%(i,j), ones_init, (1,))**2 if self.params['atomic'] else 1)
+            if nbrs_nm is not None:
+                T_2_nD, T_2_n3C = lax.with_sharding_constraint([T_2_nD, T_2_n3C], PSpec())
+                
+            # MODIFICATION: Initiate the shared linear networks outside the loop
+            shared_lin_D_0 = linear_norm(E)
+            shared_lin_D_1 = linear_norm(E)
+            shared_lin_3C_0 = linear_norm(E)
+            shared_lin_3C_1 = linear_norm(E)
+            
+            #Create a single parameter outside the loop instead of one for each pair of types
+            shared_layer_norm = self.param('shared_layer_norm', ones_init, (1,))**2 if self.params['atomic'] else 1
+
+            # Compute the message F for each pair of types, using the shared embedding's output and shared linear embeddings
+            F_nselmE = [[(shared_lin_D_0(T_2_nD[0][i])[:,None]
+                      + (shared_lin_D_1(T_2_nD[1][j])[nbrs_nm[i][j]] if nbrs_nm is not None else
+                         jnp.repeat(shared_lin_D_1(T_2_nD[1][j]),L,axis=0))
+                      + (R_n3m[i][j][...,None] * (shared_lin_3C_0(T_2_n3C[0][i])[:,:,None]
+                          + (shared_lin_3C_1(T_2_n3C[1][j])[nbrs_nm[i][j]].transpose(0,2,1,3) if nbrs_nm is not None else
+                            jnp.repeat(shared_lin_3C_1(T_2_n3C[1][j]),L,axis=0).transpose(1,0,2)))).sum(1)
+                      + emb) * shared_layer_norm
                         for j,emb in enumerate(EMB)] for i,EMB in zip(nsel,embed_nselmE)]
+            
+            
             #MODIFICATION: Compute the final embedding once and reuse for all types
             shared_embed_mp_final = embedding_net(self.params['embedMP_widths'], in_bias_only=True,
                                                 dt_layers=range(2,len(self.params['embedMP_widths'])))
