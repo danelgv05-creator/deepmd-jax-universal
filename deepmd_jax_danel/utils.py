@@ -228,8 +228,25 @@ def save_model(path, model, variables):
     print('# Model saved to \'%s\'.' % path)
 
 def load_model(path, replicate=True):
-    with open(path, 'rb') as file:
-        m = pickle.load(file)
+    import importlib
+    import sys
+    model_module = None
+    try:
+        model_module = importlib.import_module('deepmd_jax_danel.dpmodel')
+    except Exception as e:
+        print('# Warning: failed to import deepmd_jax_danel.dpmodel:', e)
+    orig_dpmodel = sys.modules.get('deepmd_jax.dpmodel')
+    if model_module is not None:
+        sys.modules['deepmd_jax.dpmodel'] = model_module
+    try:
+        with open(path, 'rb') as file:
+            m = pickle.load(file)
+    finally:
+        if model_module is not None:
+            if orig_dpmodel is None:
+                del sys.modules['deepmd_jax.dpmodel']
+            else:
+                sys.modules['deepmd_jax.dpmodel'] = orig_dpmodel
     print('# Model loaded from \'%s\'.' % path)
     if replicate:
         return m['model'], jax.device_put(m['variables'], PSpec())
