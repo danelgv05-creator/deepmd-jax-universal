@@ -4,6 +4,7 @@ import numpy as np
 import jax.numpy as jnp
 import time, datetime
 import flax.linen as nn
+from flax.core import FrozenDict, freeze, unfreeze
 from functools import partial
 from .utils import get_p3mlr_fn, get_p3mlr_grid_size, load_model, save_model, compress_model, dplr_charges
 from .data import Dataset
@@ -12,12 +13,36 @@ from typing import Union, List
 import tempfile
 import os
 
+
+def _merge_variables(old_vars, new_vars):
+    """Merge checkpoint variables into a newly initialized variable tree."""
+    if old_vars is None:
+        return new_vars
+    if isinstance(new_vars, (dict, FrozenDict)):
+        old_dict = unfreeze(old_vars) if isinstance(old_vars, FrozenDict) else (old_vars or {})
+        new_dict = unfreeze(new_vars) if isinstance(new_vars, FrozenDict) else new_vars
+        merged = {}
+        for key, new_val in new_dict.items():
+            merged[key] = _merge_variables(old_dict.get(key), new_val)
+        return freeze(merged)
+    if hasattr(new_vars, 'shape') and hasattr(old_vars, 'shape'):
+        if old_vars.shape == new_vars.shape:
+            return old_vars
+        if old_vars.shape[1:] == new_vars.shape[1:]:
+            min0 = min(old_vars.shape[0], new_vars.shape[0])
+            new_arr = np.array(new_vars)
+            new_arr[:min0] = np.array(old_vars[:min0])
+            return jnp.array(new_arr, dtype=new_vars.dtype)
+    return new_vars
+
+
 def train(
     model_type: str,
     rcut: float,
     train_data_path: Union[str, List[str]],
     val_data_path: Union[str, List[str]] = None,
     save_path: str = 'model.pkl',
+    checkpoint_path: str = None,
     step: int = 1000000,
     mp: bool = False,
     atomic_sel: List[int] = None,
@@ -71,6 +96,7 @@ def train(
                  'dplr' (force field w/ long-range electrostatics).
             rcut: cutoff radius (Angstrom) for the model.
             save_path: path to save the trained model.
+            checkpoint_path: optional model path to resume training from a previous checkpoint.
             train_data: path to training data (str) or list of paths to training data (List[str]).
             val_data: path to validation data (str) or list of paths to validation data (List[str]).
             step: number of training steps. Depending on dataset size, expect 1e5-1e7 for energy models and 1e5-1e6 for wannier models.
@@ -329,6 +355,13 @@ def train(
                     batch['box'][0],
                     static_args,
                 )
+
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
+        print(f'# Loading checkpoint from {checkpoint_path}')
+        _, old_variables = load_model(checkpoint_path, replicate=False)
+        variables = _merge_variables(old_variables, variables)
+        print('# Checkpoint merged with current model initialization.')
+
     print('# Model initialized with parameter count %d.' %
            sum(i.size for i in jax.tree_util.tree_flatten(variables)[0]))
     
