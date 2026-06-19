@@ -187,9 +187,36 @@ def train(
         assert type(atomic_sel) == list, ' Must provide atomic_sel properly for model_type "atomic"/"atomic_t2".'
     else:
         raise ValueError('model_type should be "energy", "atomic", "atomic_t2", or "dplr".')
+
+# =================================================================
+    # MODIFICATION: Read the checkpoint before the dataset to avoid chemical 'amnesia'
+    # =================================================================
+    old_chemical_types = None
+    old_variables = None
+    old_model = None
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
+        print(f'# 🔍 Extrayendo memoria química de {checkpoint_path}...')
+        old_model, old_variables = load_model(checkpoint_path, replicate=False)
+        old_chemical_types = old_model.params.get('chemical_types', None)
+
+    # load dataset
+    if 'atomic' in model_type and atomic_data_prefix is None:
+        atomic_data_prefix = 'atomic_dipole' if model_type == 'atomic' else 'atomic_polarizability'
+    if model_type in ('energy', 'dplr'):
+        labels = ['coord', 'box', 'force', 'energy']
+    elif 'atomic' in model_type:
+        labels = ['coord', 'box', atomic_data_prefix]
+        print(f'# Using {atomic_data_prefix}.npy as dataset labels.')
+        assert type(atomic_sel) == list, ' Must provide atomic_sel properly for model_type "atomic"/"atomic_t2".'
+    else:
+        raise ValueError('model_type should be "energy", "atomic", "atomic_t2", or "dplr".')
+        
     train_data = Dataset(train_data_path,
                            labels,
-                           {'atomic_sel':atomic_sel})
+                           {'atomic_sel':atomic_sel},
+                           chemical_types=old_chemical_types)  
+    #END OF MODIFICATION
+
     train_data.compute_lattice_candidate(rcut)
     chemical_types = train_data.chemical_types
 
@@ -314,15 +341,52 @@ def train(
         print(' Done. Time: %d s' % (time.time() - tic_sr))
 
     # construct model
+    stats = train_data.get_stats(rcut, getstat_bs)
+    new_ebias = None if 'atomic' in model_type else train_data.fit_energy()
+
+    # =================================================================
+    # MODIFICATION: Take into account old model's 'valid_types' and normalization stats
+    # =================================================================
+    if old_model is not None:
+        old_valid = old_model.params['valid_types']
+        old_mean = old_model.params['sr_mean']
+        old_std = old_model.params['sr_std']
+        old_ebias = old_model.params.get('Ebias', None)
+        
+        # Unimos los elementos viejos con cualquier descubrimiento nuevo
+        combined_valid = np.unique(np.concatenate([old_valid, stats['valid_types']]))
+        
+        new_mean, new_std, merged_ebias = [], [], []
+        for v in combined_valid:
+            if v in old_valid:
+                idx = list(old_valid).index(v)
+                new_mean.append(old_mean[idx])
+                new_std.append(old_std[idx])
+                if old_ebias is not None:
+                    merged_ebias.append(old_ebias[idx])
+            else:
+                idx = list(stats['valid_types']).index(v)
+                new_mean.append(stats['sr_mean'][idx])
+                new_std.append(stats['sr_std'][idx])
+                if new_ebias is not None:
+                    merged_ebias.append(new_ebias[idx])
+                
+        stats['valid_types'] = np.array(combined_valid, dtype=int)
+        stats['sr_mean'] = np.array(new_mean, dtype=np.float32)
+        stats['sr_std'] = np.array(new_std, dtype=np.float32)
+        if new_ebias is not None:
+            new_ebias = np.array(merged_ebias, dtype=np.float32)
+    # =================================================================
+
     params = {
         'type': model_type,
         'atomic_data_prefix': atomic_data_prefix if 'atomic' in model_type else None,
         'embed_widths': embed_widths[:-1] if mp else embed_widths,
         'embedMP_widths': embed_widths[-1:] + embed_mp_widths if mp else None,
-        'embed_type_width': embed_type_width, #MODIFICATION: include type widths
+        'embed_type_width': embed_type_width,
         'fit_widths': fit_widths,
         'axis': axis_neurons,
-        'Ebias': None if 'atomic' in model_type else train_data.fit_energy(),
+        'Ebias': new_ebias,
         'rcut': rcut,
         'use_2nd': True,
         'use_mp': mp,
@@ -330,7 +394,7 @@ def train(
         'hybrid': hybrid,
         'nsel': atomic_sel if 'atomic' in model_type else None,
         'out_norm': train_data.get_atomic_label_scale() if 'atomic' in model_type else 1.,
-        **train_data.get_stats(rcut, getstat_bs),
+        **stats,
     }
     if model_type == 'dplr':
         dplr_params = {
@@ -356,15 +420,15 @@ def train(
                     static_args,
                 )
 
-    if checkpoint_path is not None and os.path.exists(checkpoint_path):
-        print(f'# Loading checkpoint from {checkpoint_path}')
-        _, old_variables = load_model(checkpoint_path, replicate=False)
+    #MODIFICATION: Merge the checkpoint model if there is
+    if old_variables is not None:
+        print(f'# 🧬 Fusionando pesos físicos del checkpoint...')
         variables = _merge_variables(old_variables, variables)
-        print('# Checkpoint merged with current model initialization.')
-
+        print('# ✅ Conocimiento continuo integrado con éxito.')
     print('# Model initialized with parameter count %d.' %
            sum(i.size for i in jax.tree_util.tree_flatten(variables)[0]))
-    
+    #END OF MODIFICATION
+
     # initialize optimizer
     if lr is None:
         lr = 0.002 if 'atomic' not in model_type else 0.01

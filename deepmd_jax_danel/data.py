@@ -316,9 +316,15 @@ class ExtXYZDataset(DatasetGroup):
         else:
             unknown = all_zs - set(chemical_types)
             if unknown:
-                raise ValueError(
-                    'Atomic numbers %s in extxyz files not in chemical_types=%s'
-                    % (sorted(unknown), chemical_types))
+                # =========================================================
+                # MODIFICATION: Putting the new types at the end we mantain the previous ones
+                # =========================================================
+                print(f"# ⚛️ ¡Nuevos elementos descubiertos en este chunk! Expandiendo tabla: {sorted(unknown)}")
+                chemical_types = tuple(list(chemical_types) + sorted(unknown))
+                # raise ValueError(
+                #    'Atomic numbers %s in extxyz files not in chemical_types=%s'
+                #    % (sorted(unknown), chemical_types))
+                # END OF MODIFICATION
         self.chemical_types = chemical_types
         z_to_idx = {z: i for i, z in enumerate(chemical_types)}
         ntypes = len(chemical_types)
