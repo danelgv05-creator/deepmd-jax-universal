@@ -52,16 +52,30 @@ def tensor_3to6(x, axis, bias=0):
     return jnp.concatenate([x**2-bias, 2**0.5 * x * jnp.roll(x,shift=1,axis=axis)], axis=axis)
 
 def get_relative_coord(coord_N3, box_33, type_count, lattice_args, nbrs_nm=None):
-    x_n3m, r_nm = [], []
+    # =================================================================
+    # MODIFICATION: Added idx_nm to track the global indices of neighbors
+    # This allows us to map universal geometric distances back to their 
+    # true chemical identities later in the embedding network.
+    # =================================================================
+    x_n3m, r_nm, idx_nm = [], [], [] 
     coord_n3 = split(coord_N3, type_count, K=(1 if nbrs_nm is None else jax.device_count()))
+    
+    # Calculate global index offsets for each type block to maintain a global ID
+    type_offsets = np.insert(np.cumsum(np.array(type_count)), 0, 0)[:-1]
+
     for i in range(len(type_count)):
-        x, r = [], []
+        x, r, idx_list = [], [], []
         for j in range(len(type_count)):
             N, M = len(coord_n3[i]), len(coord_n3[j])
+            global_offset = type_offsets[j] # Base index for this type group
+            
             if N * M == 0:
-                M = M*lattice_args['lattice_max'] if nbrs_nm is None else nbrs_nm[i][j].shape[1]
-                x_N3M = jnp.ones((N, 3, M), dtype=coord_N3.dtype)
-                r_NM = jnp.ones((N, M), dtype=coord_N3.dtype)
+                M_shape = M*lattice_args['lattice_max'] if nbrs_nm is None else nbrs_nm[i][j].shape[1]
+                x_N3M = jnp.ones((N, 3, M_shape), dtype=coord_N3.dtype)
+                r_NM = jnp.ones((N, M_shape), dtype=coord_N3.dtype)
+                
+                # MODIFICATION: Dummy indices for empty tensors
+                idx_NM = jnp.zeros((N, M_shape), dtype=jnp.int32) 
             else:
                 if nbrs_nm is None:
                     lattice_cand = jnp.array(lattice_args['lattice_cand'])
@@ -71,20 +85,41 @@ def get_relative_coord(coord_N3, box_33, type_count, lattice_args, nbrs_nm=None)
                         x_N3MX = x_N3M[...,None] - (lattice_cand @ box_33).T[:,None]
                         if X == Y:
                             x_N3M = x_N3MX.reshape(N,3,-1)
+                            M_repeats = X # Each atom is repeated X times for lattice images
                         else:
                             r_NMX = jnp.linalg.norm(jnp.where(jnp.abs(x_N3MX) > 1e-15, x_N3MX, 1e-15), axis=1)
                             idx_NMY = jnp.argpartition(r_NMX, lattice_args['lattice_max'], axis=-1)[:,:,:lattice_args['lattice_max']]
                             x_N3M = jnp.take_along_axis(x_N3MX, idx_NMY[:,None], axis=-1).reshape(N,3,-1)
+                            M_repeats = Y # Each atom is repeated Y times
+                    else:
+                        M_repeats = 1
+                        
                     r_NM = jnp.linalg.norm(jnp.where(jnp.abs(x_N3M) > 1e-15, x_N3M, 1e-15), axis=1)
+                    
+                    # MODIFICATION: Map flattened local indices back to global neighbor IDs
+                    base_idx = jnp.arange(M * M_repeats) // M_repeats
+                    idx_NM = jnp.broadcast_to(base_idx + global_offset, r_NM.shape)
                 else:
                     x_N3M = shift(coord_n3[j][nbrs_nm[i][j]] - coord_n3[i][:,None], box_33, True).transpose(0,2,1)
-                    r_NM = jnp.linalg.norm(jnp.where(jnp.abs(x_N3M) > 1e-15, x_N3M, 1e-15), axis=1) * (nbrs_nm[i][j] < len(coord_n3[j]))
-                    x_N3M = x_N3M * (nbrs_nm[i][j] < len(coord_n3[j]))[:,None]
+                    valid_mask = nbrs_nm[i][j] < len(coord_n3[j])
+                    r_NM = jnp.linalg.norm(jnp.where(jnp.abs(x_N3M) > 1e-15, x_N3M, 1e-15), axis=1) * valid_mask
+                    x_N3M = x_N3M * valid_mask[:,None]
+                    
+                    # MODIFICATION: Track global neighbor ID from the dynamic neighbor list.
+                    # Out-of-bounds indices (padded) are clipped to avoid embedding errors,
+                    # but their physical contribution is already zeroed out by valid_mask.
+                    safe_local_idx = jnp.clip(nbrs_nm[i][j], 0, M - 1)
+                    idx_NM = safe_local_idx + global_offset
+                    
             x.append(x_N3M)
             r.append(r_NM)
+            idx_list.append(idx_NM) # Append indices
+            
         x_n3m.append(x)
         r_nm.append(r)
-    return x_n3m, r_nm
+        idx_nm.append(idx_list) # Append indices
+        
+    return x_n3m, r_nm, idx_nm  # MODIFICATION: Now returns 3 items instead of 2
 
 he_init = nn.initializers.he_normal()
 original_init = nn.initializers.variance_scaling(0.5, "fan_avg", "truncated_normal")
