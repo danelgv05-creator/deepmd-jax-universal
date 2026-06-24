@@ -49,7 +49,7 @@ def train(
     atomic_sel: List[int] = None,
     embed_widths: List[int] = [32,32,64],
     embed_mp_widths: List[int] = [64,64,64],
-    embed_type_width: int = 2, #MODIFICATION: Include type widths
+    embed_type_width: int = 8, #MODIFICATION: Include type widths
     fit_widths: List[int] = None,
     axis_neurons: int=12,
     lr: float = None,
