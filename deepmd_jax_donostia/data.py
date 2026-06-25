@@ -476,9 +476,6 @@ class ExtXYZDataset(DatasetGroup):
             bucket = next((b for b in buckets if b >= raw_natoms), raw_natoms)
             pad_len = bucket - raw_natoms
             
-            bucket = next((b for b in buckets if b >= raw_natoms), raw_natoms)
-            pad_len = bucket - raw_natoms
-            
             # Guardar el conteo de elementos reales de ESTE frame para el Ebias
             type_count = np.bincount(types, minlength=len(chemical_types))
             entry['_type_count'] = type_count
