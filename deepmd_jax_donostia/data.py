@@ -31,7 +31,7 @@ def _infer_lattice_buckets(lattice_max_values, params=None):
     # Keep lattice bucketing stable and aligned with the intended grouping logic.
     # Using the fixed thresholds avoids exploding the number of 2D buckets when
     # the dataset contains many small lattice values.
-    return [30, 70, 110, 200]
+    return [30, 70, 110, 150, 200, 250, 300, 350, 400, 500]
 
 
 def Dataset(paths, labels, params=None, chemical_types=None):
@@ -93,6 +93,7 @@ class DatasetLeaf:
     """
     def __init__(self, labels, params, type_arr, data, paths=None, bucket_key=None, lattice_args=None):
         self.chemical_types = getattr(self, 'chemical_types', None)
+        self.params = params or {}
         self.lattice_args = lattice_args
         type_arr = np.array(type_arr, dtype=int)
         
@@ -129,8 +130,8 @@ class DatasetLeaf:
             if paths is not None:
                 from os.path import abspath
                 bucket_desc = '' if self.bucket_key is None else f' | BucketKey {self.bucket_key}'
-                print('# Dataset Leaf (Bucket %d)%s: %d frames. Path:' % (self.natoms, bucket_desc, self.nframes),
-                      ''.join(['\n# \t\'%s\'' % abspath(path) for path in paths]))
+                #print('# Dataset Leaf (Bucket %d)%s: %d frames. Path:' % (self.natoms, bucket_desc, self.nframes),
+                #      ''.join(['\n# \t\'%s\'' % abspath(path) for path in paths]))
 
         # --- LÓGICA ANTERIOR: Para formato DP clásico (1D) ---
         else:
@@ -207,7 +208,7 @@ class DatasetLeaf:
         coord, box = batch['coord'], batch['box']
         
         if self.type_idx.ndim == 2:
-            # Para buckets 2D extraemos el primer frame sin átomos fantasma para las estadísticas
+            # Para buckets 2D extraemos el primer frame sin átomos fantasma para las estadísticas (¿Siempre habrá un frame sin fantasmas?)
             real_mask = batch['type_idx'][0] != -1
             coord = coord[0:1, real_mask]
             box = box[0:1]
@@ -226,36 +227,7 @@ class DatasetLeaf:
         sr_count = np.array([(s > 1e-15).sum() for s in sr_BnM])
         Nnbrs = (np.concatenate(sr_BnM, axis=1) > 0).sum(2).mean() + 1
         return np.array([sr_sum, sr_sum2, sr_count, Nnbrs * np.ones_like(sr_sum)])
-
-    def get_batch(self, batch_size, type='frame'):
-        if type == 'label':
-            batch_size = max(int(batch_size / (self.natoms + self.lattice_args['lattice_max'])),1)
-        
-        indices = np.arange(self.pointer, self.pointer + batch_size) % self.nframes
-        self.pointer = (self.pointer + batch_size) % self.nframes
-            
-        batch = {
-            'atomic' if 'atomic' in l else l:
-            self.data[l][indices]
-            for l in self.data
-        }
-        if self.type_idx.ndim == 2:
-            batch['type_idx'] = self.type_idx[indices]
-        else:
-            batch['type_idx'] = np.tile(self.type_idx, (batch_size, 1))
-
-        return batch, tuple(self.type_idx.flatten()), self.lattice_args
-
-    def compute_lattice_candidate(self, rcut):
-        if self.lattice_args is None:
-            self.lattice_args = compute_lattice_candidate(self.data['box'], rcut, print_info=False)
-        else:
-            self.lattice_args = {
-                **self.lattice_args,
-                'lattice_max': int(self.lattice_args.get('lattice_max', 0)),
-            }
-        print(f"# 🧊 Bucket Listo -> Átomos (Padded): {self.natoms:<4} | Cajas (Lattice Max): {self.lattice_args['lattice_max']:<4} | Frames: {self.nframes}")
-
+    
     def get_stats(self, rcut, bs):
         self.params = {'rcut': rcut}
         sr_sum, sr_sum2, sr_count, Nnbrs = self._get_stats(rcut, bs)
@@ -282,6 +254,46 @@ class DatasetLeaf:
             
         return self.params
 
+    def get_batch(self, batch_size, type='frame'):
+        if type == 'label':
+            batch_size = max(int(batch_size*30.0 / (self.natoms * self.lattice_args['lattice_max'])),1)
+        
+        indices = np.arange(self.pointer, self.pointer + batch_size) % self.nframes
+        self.pointer = (self.pointer + batch_size) % self.nframes
+            
+        batch = {
+            'atomic' if 'atomic' in l else l:
+            self.data[l][indices]
+            for l in self.data
+        }
+        if self.type_idx.ndim == 2:
+            batch['type_idx'] = self.type_idx[indices]
+        else:
+            batch['type_idx'] = np.tile(self.type_idx, (batch_size, 1))
+
+        return batch, tuple(self.type_idx.flatten()), self.lattice_args
+
+    def compute_lattice_candidate(self, rcut):
+        if self.lattice_args is None:
+            self.lattice_args = compute_lattice_candidate(self.data['box'], rcut, print_info=False)
+        else:
+            self.lattice_args = {
+                **self.lattice_args,
+                'lattice_max': int(self.lattice_args.get('lattice_max', 0)),
+            }
+
+        lattice_bucket = self.bucket_key[1] if self.bucket_key is not None else 'N/A'
+        batch_size = self.params.get('batch_size')
+        label_bs = self.params.get('label_bs')
+        if batch_size is not None:
+            batch_info = f' | Batch size: {batch_size}'
+        elif label_bs is not None:
+            effective_batch = max(int(label_bs / (self.natoms + self.lattice_args['lattice_max'])), 1)
+            batch_info = f' | Label batch size: {effective_batch}'
+        else:
+            batch_info = ''
+        print(f"# 🧊 Bucket Listo -> Átomos (Padded): {self.natoms:<4} | Cajas (Lattice Max): {self.lattice_args['lattice_max']:<4} | Lattice Bucket: {lattice_bucket:<4} | Frames: {self.nframes}{batch_info}")
+
     def fit_energy(self):
         energy_stats = self._get_energy_stats()
         type_count, energy_mean = [np.array(x) for x in zip(*energy_stats)]
@@ -306,6 +318,31 @@ class DatasetLeaf:
     def get_leaves(self):
         return [self]
 
+    def _get_energy_stats(self):
+        """
+        Extrae la energía total y la composición atómica.
+        Calcula los conteos al vuelo si la base de datos no los provee.
+        """
+        if 'energy' not in self.data:
+            return []
+            
+        energies = self.data['energy'].flatten()
+        
+        # Si ya lo calculamos en el preprocesado, lo usamos
+        if '_type_counts' in self.data:
+            type_counts = self.data['_type_counts']
+        else:
+            # Fallback dinámico para MPTraj y bases de datos .npy
+            if self.type_idx.ndim == 1:
+                valid_types = self.type_idx[self.type_idx >= 0] # Ignoramos fantasmas (-1)
+                n_types = np.max(valid_types) + 1 if len(valid_types) > 0 else 0
+                counts = np.bincount(valid_types, minlength=n_types)
+                type_counts = np.tile(counts, (len(energies), 1))
+            else:
+                n_types = np.max(self.type_idx) + 1 if np.max(self.type_idx) >= 0 else 0
+                type_counts = np.array([np.bincount(t[t >= 0], minlength=n_types) for t in self.type_idx])
+                
+        return list(zip(type_counts, energies))
 
 class DPDataset(DatasetLeaf):
     """
@@ -358,24 +395,7 @@ class DatasetGroup:
     def _get_stats(self, rcut, bs):
         s = np.stack([subset._get_stats(rcut, bs) for subset in self.subsets], axis=-1)
         return (s * self.prob).sum(-1)
-
-    def get_batch(self, batch_size, type='frame'):
-        subset = np.random.choice(len(self.subsets), p=self.prob)
-        return self.subsets[subset].get_batch(batch_size, type)
-
-    def compute_lattice_candidate(self, rcut):
-        for subset in self.subsets:
-            subset.compute_lattice_candidate(rcut)
-            
-        # =================================================================
-        # MODIFICATION: Unify lattice_args across all subsets
-        # This prevents recompilation when switching between different leaves.
-        # =================================================================
-        best_subset = max(self.subsets, key=lambda s: s.lattice_args['lattice_max'])
-        global_lattice_args = best_subset.lattice_args
-        for subset in self.subsets:
-            subset.lattice_args = global_lattice_args
-
+    
     def get_stats(self, rcut, bs):
         self.params = {'rcut': rcut}
         sr_sum, sr_sum2, sr_count, Nnbrs = self._get_stats(rcut, bs)
@@ -402,6 +422,23 @@ class DatasetGroup:
             
         return self.params
 
+    def get_batch(self, batch_size, type='frame'):
+        subset = np.random.choice(len(self.subsets), p=self.prob)
+        return self.subsets[subset].get_batch(batch_size, type)
+
+    def compute_lattice_candidate(self, rcut):
+        for subset in self.subsets:
+            subset.compute_lattice_candidate(rcut)
+            
+        # =================================================================
+        # MODIFICATION: Unify lattice_args across all subsets
+        # This prevents recompilation when switching between different leaves.
+        # =================================================================
+        #best_subset = max(self.subsets, key=lambda s: s.lattice_args['lattice_max'])
+        #global_lattice_args = best_subset.lattice_args
+        #for subset in self.subsets:
+        #    subset.lattice_args = global_lattice_args
+
     def fit_energy(self):
         energy_stats = self._get_energy_stats()
         type_count, energy_mean = [np.array(x) for x in zip(*energy_stats)]
@@ -420,7 +457,20 @@ class DatasetGroup:
         return (np.array([subset.get_atomic_label_scale() for subset in self.subsets]) * np.array(self.prob)).sum()
 
     def _get_energy_stats(self):
-        return sum([subset._get_energy_stats() for subset in self.subsets], [])
+        # Recopilamos las estadísticas de todos los 2D Buckets
+        raw_stats = sum([subset._get_energy_stats() for subset in self.subsets], [])
+        
+        if not raw_stats:
+            return []
+            
+        # =================================================================
+        # PROTECCIÓN MATRICIAL: Igualamos la longitud de todos los arrays.
+        # Si un bucket solo tiene H y O, y otro tiene C, los igualamos con ceros.
+        # =================================================================
+        max_len = max(len(x[0]) for x in raw_stats)
+        normalized_stats = [(np.pad(x[0], (0, max_len - len(x[0]))), x[1]) for x in raw_stats]
+        
+        return normalized_stats
 
     def get_flattened_data(self):
         return sum([subset.get_flattened_data() for subset in self.subsets], [])
@@ -562,31 +612,29 @@ def _compute_lattice_maxes(boxes, rcut):
     if boxes.ndim == 2:
         boxes = boxes[None]
 
-    ortho = not np.any(np.array([box - np.diag(np.diag(box)) for box in boxes]).any())
-    recp_norm = np.linalg.norm(np.linalg.inv(boxes), axis=-1)
-    n = np.ceil(rcut * recp_norm - 0.5).astype(int)
-    n_max = n.max(axis=0)
-
-    lattice_cand = np.stack(
-        np.meshgrid(
-            np.arange(-n_max[0], n_max[0] + 1),
-            np.arange(-n_max[1], n_max[1] + 1),
-            np.arange(-n_max[2], n_max[2] + 1),
-            indexing='ij',
-        ),
-        axis=-1,
-    ).reshape(-1, 3)
+    lattice_maxes = []
+    N = 2
     trial_points = np.stack(
-        np.meshgrid(np.arange(-2, 3), np.arange(-2, 3), np.arange(-2, 3)),
+        np.meshgrid(np.arange(-N, N + 1), np.arange(-N, N + 1), np.arange(-N, N + 1)),
         axis=-1,
-    ).reshape(-1, 3) / 4.0
+    ).reshape(-1, 3) / (2.0 * N)
 
-    diff = lattice_cand[:, None, :] - trial_points[None, :, :]
-    cart = np.einsum('ctd,bde->bcte', diff, boxes)
-    is_neighbor = np.linalg.norm(cart, axis=-1) < rcut
-    counts = is_neighbor.sum(axis=2)
-    lattice_maxes = counts.max(axis=1)
-    return lattice_maxes.astype(int)
+    # Iteración caja por caja para evitar el OOM Kill de SLURM (Consumo RAM < 1MB)
+    for box in boxes:
+        recp_norm = np.linalg.norm(np.linalg.inv(box), axis=-1)
+        n = np.ceil(rcut * recp_norm - 0.5).astype(int)
+
+        rx, ry, rz = np.arange(-n[0], n[0]+1), np.arange(-n[1], n[1]+1), np.arange(-n[2], n[2]+1)
+        lattice_cand = np.stack(np.meshgrid(rx, ry, rz, indexing='ij'), axis=-1).reshape(-1, 3)
+
+        diff = (lattice_cand[:, None, :] - trial_points[None, :, :]) @ box
+        is_neighbor = np.linalg.norm(diff, axis=-1) < rcut
+        
+        # ¡LA MAGIA AQUÍ! 
+        # sum(axis=0) suma sobre Candidatos. Luego .max() busca el peor Punto de Prueba.
+        lattice_maxes.append(is_neighbor.sum(axis=0).max())
+
+    return np.array(lattice_maxes, dtype=int)
 
 
 def compute_lattice_candidate(boxes, rcut, print_info=True, disable_ortho=False):
@@ -595,6 +643,8 @@ def compute_lattice_candidate(boxes, rcut, print_info=True, disable_ortho=False)
         boxes = boxes[None]
 
     ortho = not np.any(np.array([box - np.diag(np.diag(box)) for box in boxes]).any())
+    
+    # Calculamos la malla envolvente global para todas las cajas de este bucket
     recp_norm = np.linalg.norm(np.linalg.inv(boxes), axis=-1)
     n = np.ceil(rcut * recp_norm - 0.5).astype(int)
     n_max = n.max(axis=0)
@@ -608,23 +658,40 @@ def compute_lattice_candidate(boxes, rcut, print_info=True, disable_ortho=False)
         ),
         axis=-1,
     ).reshape(-1, 3)
+    
+    N = 2
     trial_points = np.stack(
-        np.meshgrid(np.arange(-2, 3), np.arange(-2, 3), np.arange(-2, 3)),
+        np.meshgrid(np.arange(-N, N + 1), np.arange(-N, N + 1), np.arange(-N, N + 1)),
         axis=-1,
-    ).reshape(-1, 3) / 4.0
+    ).reshape(-1, 3) / (2.0 * N)
 
-    diff = lattice_cand[:, None, :] - trial_points[None, :, :]
-    cart = np.einsum('ctd,bde->bcte', diff, boxes)
-    is_neighbor = np.linalg.norm(cart, axis=-1) < rcut
-    active_candidates = is_neighbor.any(axis=(0, 2))
-    lattice_cand = lattice_cand[active_candidates]
-    lattice_max = int(is_neighbor.sum(axis=2).max())
+    global_active_candidates = np.zeros(len(lattice_cand), dtype=bool)
+    global_lattice_max = 0
+
+    # Iteración caja por caja
+    for box in boxes:
+        diff = (lattice_cand[:, None, :] - trial_points[None, :, :]) @ box
+        is_neighbor = np.linalg.norm(diff, axis=-1) < rcut
+        
+        # Aquí axis=1 es correcto porque usamos is_neighbor.any() para reducir T
+        global_active_candidates |= is_neighbor.any(axis=1) 
+        
+        # ¡EL MISMO ARREGLO! sum(axis=0) para Candidatos, .max() para Puntos de Prueba
+        box_max = is_neighbor.sum(axis=0).max()
+        if box_max > global_lattice_max:
+            global_lattice_max = box_max
+
+    lattice_cand = lattice_cand[global_active_candidates]
+    lattice_max = int(global_lattice_max)
+    
     if lattice_cand.size:
         lattice_max = min(lattice_max, len(lattice_cand))
     else:
         lattice_max = 0
+        
     if print_info:
         print('# Lattice vectors for neighbor images: Max %d out of %d candidates.' % (lattice_max, len(lattice_cand)))
+        
     return {'lattice_cand': tuple(map(tuple, lattice_cand)),
             'lattice_max': lattice_max,
             'ortho': ortho if not disable_ortho else False}

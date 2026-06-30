@@ -225,7 +225,7 @@ def train(
         
     train_data = Dataset(train_data_path,
                          labels,
-                         {'atomic_sel': atomic_sel},
+                         {'atomic_sel': atomic_sel, 'label_bs': label_bs, 'batch_size': batch_size},
                          chemical_types=target_chemical_types)  
     # END OF MODIFICATION=================================================================
 
@@ -310,7 +310,7 @@ def train(
         for i in range(n_paths):
             single_data_obs = Dataset(obs_train_data_path[i],
                                         labels_obs,
-                                        {'atomic_sel':atomic_sel},
+                                        {'atomic_sel':atomic_sel, 'label_bs': label_bs, 'batch_size': batch_size},
                                         chemical_types=chemical_types)
             single_data_obs.compute_lattice_candidate(rcut)
             train_data_obs.append(single_data_obs)
@@ -319,7 +319,7 @@ def train(
     if use_val_data:
         val_data = Dataset(val_data_path,
                              labels,
-                             {'atomic_sel':atomic_sel},
+                             {'atomic_sel':atomic_sel, 'label_bs': label_bs, 'batch_size': batch_size},
                              chemical_types=chemical_types)
         val_data.compute_lattice_candidate(rcut)
     else:
